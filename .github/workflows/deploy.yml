@@ -1,0 +1,27 @@
+# Every push to main that passes the tests is mirrored to the Hugging Face Space.
+# Setup (once): add a repo secret HF_TOKEN (a Hugging Face write token) and a repo
+# variable HF_SPACE such as "your-hf-username/product-canvas".
+name: Deploy to Hugging Face
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE" ]; then
+            echo "HF_TOKEN or HF_SPACE not set; skipping deploy."; exit 0
+          fi
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" HEAD:main

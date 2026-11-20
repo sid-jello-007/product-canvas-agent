@@ -1,0 +1,8 @@
+[
+  {"id": "cafe-stock", "idea": "A tool that helps small cafes predict how much stock to order each week, using their till data and the weather forecast."},
+  {"id": "split-bills", "idea": "An app for flatmates to split shared bills and settle up automatically."},
+  {"id": "sme-cashflow", "idea": "A cash flow forecast for UK small businesses that connects to their bank via open banking and warns them 30 days before they run short."},
+  {"id": "clinic-noshow", "idea": "Reduce missed appointments at physiotherapy clinics with smart reminders and an easy rebooking flow."},
+  {"id": "internal-it", "idea": "An internal assistant that lets employees raise and track IT requests in plain English from Slack."},
+  {"id": "vague", "idea": "Something with AI for gardeners."}
+]
