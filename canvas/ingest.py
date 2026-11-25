@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 
 from .llm import LLM
 
-TEXT_TYPES = {".txt", ".md", ".markdown"}
+TEXT_TYPES = {".txt", ".md", ".markdown", ".json", ".yaml", ".yml", ".js"}
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 HTML_TYPES = {".html", ".htm"}
 SUPPORTED = TEXT_TYPES | set(IMAGE_TYPES) | HTML_TYPES | {".pdf", ".docx"}

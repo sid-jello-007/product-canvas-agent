@@ -2,7 +2,8 @@
 
 Run this whenever you change a prompt or a model, and compare the scorecard
 with the previous one. It is the offline equivalent of a pilot's KPI review:
-quality, refinement lift, latency and cost per run.
+spec validity, plan coverage, how often the first build passes, fix rounds,
+latency and cost per run.
 
     MISTRAL_API_KEY=... python -m evals.run_evals            # real models
     python -m evals.run_evals --demo                          # wiring check, no key needed
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from canvas.llm import FakeLLM, MistralLLM
-from canvas.pipeline import build_backlog, build_canvas
+from canvas.pipeline import fast_forward
 from canvas.telemetry import Telemetry
 
 HERE = Path(__file__).parent
@@ -29,15 +30,17 @@ def run(demo: bool, limit: int | None, pause: float) -> Path:
         telemetry = Telemetry()
         llm = FakeLLM(telemetry) if demo else MistralLLM(telemetry=telemetry)
         try:
-            c = build_canvas(case["idea"], [], llm)
-            r = build_backlog(c.canvas, c.context.as_prompt(), llm)
+            r = fast_forward(case["idea"], [], "", [], None, llm)
             t = telemetry.totals()
+            results = r.review.results
+            first = r.build_rounds[0].split(":")[1].split(" scenarios")[0].strip()
             rows.append({
-                "id": case["id"], "status": "ok", "stories": len(r.plan.all_stories()),
-                "first_pass": r.first_pass_score, "final": r.quality.overall,
-                "rule_pass": round(r.quality.rule_pass_rate, 2), "judge": round(r.quality.avg_judge_score, 2),
-                "uncovered": len(r.quality.uncovered_requirements), "duplicates": len(r.quality.duplicates),
-                "refined": len(r.quality.refined_keys), "seconds": t["seconds"], "cost_usd": t["cost_usd"],
+                "id": case["id"], "status": "ok",
+                "reqs": sum(len(c.requirements) for c in r.spec.capabilities),
+                "spec_errors": len(r.spec_report.errors), "conflicts": len(r.spec.conflicts),
+                "plan_errors": len(r.plan_report.errors), "static_errors": len(r.static_report.errors),
+                "first_build": first, "final": f"{sum(x.status == 'pass' for x in results)}/{len(results)}",
+                "fix_rounds": len(r.build_rounds) - 1, "seconds": t["seconds"], "cost_usd": t["cost_usd"],
             })
         except Exception as exc:  # noqa: BLE001
             rows.append({"id": case["id"], "status": f"error: {exc}"[:120]})
@@ -46,13 +49,13 @@ def run(demo: bool, limit: int | None, pause: float) -> Path:
 
     ok = [r for r in rows if r["status"] == "ok"]
     avg = lambda k: round(sum(r[k] for r in ok) / len(ok), 2) if ok else 0  # noqa: E731
+    clean = sum(1 for r in ok if not (r["spec_errors"] or r["plan_errors"] or r["static_errors"]))
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         f"# Eval scorecard ({'demo' if demo else 'live Mistral'}, {stamp})", "",
-        f"Cases: {len(rows)} | succeeded: {len(ok)} | avg final score: {avg('final')} | "
-        f"avg lift from refinement: {round(avg('final') - avg('first_pass'), 1)} | "
+        f"Cases: {len(rows)} | completed: {len(ok)} | clean on every check: {clean} | "
         f"avg seconds: {avg('seconds')} | avg cost: ${avg('cost_usd')}", "",
-        "| Case | Stories | First pass | Final | Rules pass | Judge | Uncovered reqs | Duplicates | Refined | Seconds | Cost $ |",
+        "| Case | Reqs | Spec errors | Conflicts | Plan errors | Static errors | First build | Final | Fix rounds | Seconds | Cost $ |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
@@ -60,8 +63,8 @@ def run(demo: bool, limit: int | None, pause: float) -> Path:
             lines.append(f"| {r['id']} | {r['status']} |" + " |" * 10)
             continue
         lines.append(
-            f"| {r['id']} | {r['stories']} | {r['first_pass']} | {r['final']} | {r['rule_pass']:.0%} | {r['judge']} | "
-            f"{r['uncovered']} | {r['duplicates']} | {r['refined']} | {r['seconds']} | {r['cost_usd']} |"
+            f"| {r['id']} | {r['reqs']} | {r['spec_errors']} | {r['conflicts']} | {r['plan_errors']} | {r['static_errors']} | "
+            f"{r['first_build']} | {r['final']} | {r['fix_rounds']} | {r['seconds']} | {r['cost_usd']} |"
         )
     out = HERE / "results" / ("scorecard_demo.md" if demo else "scorecard.md")
     out.parent.mkdir(exist_ok=True)

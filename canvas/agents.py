@@ -1,71 +1,115 @@
-"""The four agents. Each has one job, one prompt and one output contract.
+"""The agents. Each has one job, one skill file and one output contract.
 
-Splitting the work this way mirrors how a product team works (discovery,
-spec, backlog, review) and makes each step testable and swappable: you can
-change the model or prompt of one agent without touching the others.
+Agent instructions live in skills/<name>/SKILL.md, in the open Agent Skills
+format (a name, a description and plain instructions). Keeping them as files
+means a product owner can read and change an agent's behaviour without touching
+Python, and the same skills can be reused by other agent tools.
 """
 from __future__ import annotations
 
 import json
+import re
+from functools import lru_cache
+from pathlib import Path
 
 from .config import SETTINGS
 from .guardrails import UNTRUSTED_CONTENT_RULE
 from .llm import LLM, to_json
-from .schemas import Critique, ProductCanvas, ProductSpec, RefinedStories, Story, TicketPlan
+from .schemas import (
+    Architecture, DesignDoc, Exploration, ProductCanvas, QAReview, SpecPackage, TaskPlan,
+)
 
 M = SETTINGS.models
-
-CANVAS_SYSTEM = f"""You are a senior product manager running discovery.
-Turn the material provided into a product canvas. Be specific and grounded in the material;
-where the material is silent, make a sensible assumption and list it under assumptions_and_risks,
-and put genuine unknowns under open_questions. Success metrics must have numeric targets.
-{UNTRUSTED_CONTENT_RULE}"""
-
-SPEC_SYSTEM = f"""You are a senior product manager writing a product spec (PRD) from an agreed product canvas.
-Write 4 to 10 functional requirements with ids FR-1, FR-2, ... Each must be specific and testable.
-Use MoSCoW priority (Must, Should, Could). Keep the MVP tight: only the core job is Must.
-{UNTRUSTED_CONTENT_RULE}"""
-
-TICKETS_SYSTEM = """You are a delivery lead turning a product spec into a Jira backlog.
-Rules:
-- Group stories into 2 to 5 epics with keys E1, E2, ... and story keys E1-S1, E1-S2, ...
-- user_story must read: "As a <user>, I want <goal>, so that <benefit>."
-- 2 to 4 acceptance criteria per story, each written as "Given ..., when ..., then ...".
-- story_points must be a Fibonacci number: 1, 2, 3, 5, 8 or 13. Split anything bigger than 8.
-- Every Must and Should requirement must be covered by at least one story (list ids in requirement_ids).
-- dependencies lists keys of stories that must ship first."""
-
-CRITIC_SYSTEM = """You are a strict agile coach reviewing user stories against INVEST
-(Independent, Negotiable, Valuable, Estimable, Small, Testable).
-Score each story 1 to 5. List concrete issues for anything below 4. Do not rewrite stories."""
-
-REFINE_SYSTEM = """You are a delivery lead fixing user stories that failed review.
-Rewrite only the stories given, keeping their keys. Fix every issue listed while following the backlog rules:
-"As a..., I want..., so that..." user stories, 2 to 4 "Given..., when..., then..." acceptance criteria,
-Fibonacci story points, and requirement_ids that point at real spec requirements."""
+SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 
-def canvas_agent(llm: LLM, context_prompt: str) -> ProductCanvas:
-    return llm.structured("agent: canvas", M.generate, CANVAS_SYSTEM, context_prompt, ProductCanvas)
+@lru_cache(maxsize=None)
+def skill(name: str) -> str:
+    """Load a skill's instructions (the body after the YAML front matter)."""
+    raw = (SKILLS_DIR / name / "SKILL.md").read_text(encoding="utf-8")
+    body = re.sub(r"^---\n.*?\n---\n", "", raw, count=1, flags=re.DOTALL)
+    return body.strip() + "\n\n" + UNTRUSTED_CONTENT_RULE
 
 
-def spec_agent(llm: LLM, canvas: ProductCanvas, context_prompt: str) -> ProductSpec:
-    user = f"Agreed product canvas:\n{to_json(canvas)}\n\nOriginal material for reference:\n{context_prompt}"
-    return llm.structured("agent: spec", M.generate, SPEC_SYSTEM, user, ProductSpec)
+def extract_code(text: str, lang: str) -> str:
+    """Pull the first fenced code block of the given language out of a model reply."""
+    match = re.search(rf"```{lang}\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if not match:
+        match = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", text, re.DOTALL)
+    return (match.group(1) if match else text).strip()
 
 
-def ticket_agent(llm: LLM, spec: ProductSpec) -> TicketPlan:
-    return llm.structured("agent: tickets", M.generate, TICKETS_SYSTEM, f"Product spec:\n{to_json(spec)}", TicketPlan)
+# ---------------- 01 Domain store ----------------
+
+def canvas_agent(llm: LLM, po_context: str, answers: str = "") -> ProductCanvas:
+    user = po_context + (f"\n\nAnswers from the product owner:\n{answers}" if answers.strip() else "")
+    return llm.structured("canvas agent", M.generate, skill("product-canvas"), user, ProductCanvas)
 
 
-def critic_agent(llm: LLM, plan: TicketPlan) -> Critique:
-    return llm.structured("agent: critic", M.judge, CRITIC_SYSTEM, f"Stories to review:\n{to_json(plan)}", Critique)
-
-
-def refine_agent(llm: LLM, spec: ProductSpec, stories: list[Story], issues: dict[str, list[str]]) -> list[Story]:
-    payload = [{"story": s.model_dump(), "issues": issues.get(s.key, [])} for s in stories]
+def architecture_agent(llm: LLM, canvas: ProductCanvas, arch_inputs: str) -> Architecture:
     user = (
-        f"Spec requirement ids available: {[r.id for r in spec.requirements]}\n\n"
-        f"Stories to fix:\n{json.dumps(payload, indent=2)}"
+        f"Architecture inputs:\n<source name=\"architecture inputs\" kind=\"text\">\n{arch_inputs or '(none provided)'}\n</source>\n\n"
+        f"The change being designed:\n{to_json(canvas)}"
     )
-    return llm.structured("agent: refine", M.generate, REFINE_SYSTEM, user, RefinedStories).stories
+    return llm.structured("architecture agent", M.generate, skill("architecture"), user, Architecture)
+
+
+def spec_agent(llm: LLM, canvas: ProductCanvas, arch: Architecture, resolutions: str = "") -> SpecPackage:
+    user = f"Approved product canvas:\n{to_json(canvas)}\n\nApproved architecture:\n{to_json(arch)}"
+    if resolutions.strip():
+        user += f"\n\nAnswers to earlier conflicts (apply these):\n{resolutions}"
+    return llm.structured("spec agent", M.generate, skill("spec-author"), user, SpecPackage)
+
+
+# ---------------- 02 Delivery ----------------
+
+def explore_agent(llm: LLM, spec: SpecPackage, target_code: str) -> Exploration:
+    user = (
+        f"Approved spec:\n{to_json(spec)}\n\nTarget code:\n"
+        + (f"<source name=\"target\" kind=\"code\">\n{target_code}\n</source>" if target_code else "(none: greenfield)")
+    )
+    return llm.structured("explore agent", M.generate, skill("explore"), user, Exploration)
+
+
+def design_agent(llm: LLM, spec: SpecPackage, arch: Architecture, explore: Exploration) -> DesignDoc:
+    user = f"Spec:\n{to_json(spec)}\n\nArchitecture:\n{to_json(arch)}\n\nExplore findings:\n{to_json(explore)}"
+    return llm.structured("design agent", M.generate, skill("design"), user, DesignDoc)
+
+
+def task_agent(llm: LLM, spec: SpecPackage, design: DesignDoc) -> TaskPlan:
+    user = f"Spec:\n{to_json(spec)}\n\nDesign:\n{to_json(design)}"
+    return llm.structured("planning agent", M.generate, skill("task-planner"), user, TaskPlan)
+
+
+def qa_automation_agent(llm: LLM, plan: TaskPlan, design: DesignDoc) -> str:
+    user = (
+        f"QA plan:\n{json.dumps([t.model_dump() for t in plan.qa_plan], indent=2)}\n\n"
+        f"UI structure and test ids from the design:\n" + "\n".join(f"- {u}" for u in design.ui_structure)
+    )
+    return extract_code(llm.text("QA automation agent (tests first)", M.code, skill("qa-automation"), user), "javascript")
+
+
+def build_agent(llm: LLM, spec: SpecPackage, design: DesignDoc, plan: TaskPlan, tests: str,
+                target_code: str = "", failures: str = "", current_html: str = "") -> str:
+    if failures:
+        step = "implementation agent (fix)"
+        user = f"Current app:\n```html\n{current_html}\n```\n\nQA failures to fix:\n{failures}\n\nTests:\n```javascript\n{tests}\n```"
+    else:
+        step = "implementation agent (build)"
+        user = (
+            f"Spec:\n{to_json(spec)}\n\nDesign:\n{to_json(design)}\n\nTasks:\n{to_json(plan)}\n\n"
+            f"Tests that must pass:\n```javascript\n{tests}\n```"
+        )
+        if target_code:
+            user += f"\n\nExisting target code to evolve (keep what still fits):\n```html\n{target_code}\n```"
+    return extract_code(llm.text(step, M.code, skill("implementation"), user), "html")
+
+
+def qa_review_agent(llm: LLM, spec: SpecPackage, html: str, tests: str, static_issues: list[str]) -> QAReview:
+    scenarios = [s.name for c in spec.capabilities for r in c.requirements for s in r.scenarios]
+    user = (
+        f"Scenarios to check: {json.dumps(scenarios)}\n\nSpec:\n{to_json(spec)}\n\n"
+        f"Static check findings: {json.dumps(static_issues)}\n\n"
+        f"App code:\n```html\n{html}\n```\n\nTests:\n```javascript\n{tests}\n```"
+    )
+    return llm.structured("QA review agent", M.review, skill("qa-review"), user, QAReview)

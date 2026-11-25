@@ -26,6 +26,7 @@ class LLM(Protocol):
     telemetry: Telemetry
 
     def structured(self, step: str, model: str, system: str, user: str, schema: Type[T]) -> T: ...
+    def text(self, step: str, model: str, system: str, user: str) -> str: ...
     def describe_image(self, name: str, data: bytes, mime: str) -> str: ...
     def ocr_pdf(self, name: str, data: bytes) -> str: ...
     def embed(self, texts: list[str]) -> list[list[float]]: ...
@@ -98,6 +99,17 @@ class MistralLLM:
                     ]
         raise RuntimeError(f"{step}: model output did not match the schema after a repair attempt")
 
+    def text(self, step: str, model: str, system: str, user: str) -> str:
+        """Free text answer, used for code where JSON escaping would get in the way."""
+        with self.telemetry.track(step, model) as ev:
+            resp = self._with_retries(lambda: self.client.chat.complete(
+                model=model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.2,
+            ))
+            self._usage(ev, resp)
+            return resp.choices[0].message.content
+
     def describe_image(self, name: str, data: bytes, mime: str) -> str:
         """Turn a design (Figma export, screenshot, sketch) into a written description of screens and flows."""
         url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
@@ -162,9 +174,14 @@ class FakeLLM:
             ev.input_tokens, ev.output_tokens = len(user) // 4, 400
             return self.demo.respond(schema, user)
 
+    def text(self, step, model, system, user):
+        with self.telemetry.track(step, f"demo ({model})") as ev:
+            ev.input_tokens, ev.output_tokens = len(user) // 4, 1500
+            return self.demo.respond_text(step, user)
+
     def describe_image(self, name, data, mime):
         with self.telemetry.track(f"vision: {name}", "demo"):
-            return f"[demo] Design '{name}': a home screen listing shared bills and an 'Add bill' button."
+            return f"[demo] Design '{name}': a home screen listing savings pots with progress bars and a 'New pot' button."
 
     def ocr_pdf(self, name, data):
         with self.telemetry.track(f"ocr: {name}", "demo") as ev:
